@@ -1,7 +1,7 @@
 // A working token-radar-01 entry (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every rankable pre-token protocol with the radar-2 model in lib/model.ts, writes
+// scores every rankable pre-token protocol with the radar-3 model in lib/model.ts, writes
 // the ranked board to /output/board.json, and copies this repository's dashboard/ and
 // screenshots/ to /output. Last, it writes /output/dossier.json, the summary the judge
 // reads, with the vendored make.fun library.

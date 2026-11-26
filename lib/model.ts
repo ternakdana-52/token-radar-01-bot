@@ -1,4 +1,4 @@
-// Token Radar's model, radar-2: one sealed snapshot in, one ranked board out.
+// Token Radar's model, radar-3: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every pre-token protocol the snapshot can rank: the whole 40-protocol
 // watchlist plus every other pre-token protocol that passes the watchlist's own rule.
@@ -19,18 +19,29 @@
 // the median live bridge at 0.56x. So each row is scored at its own category's multiple,
 // taken from the live protocols that already trade in that category.
 //
+// radar-3 damps the two noisiest inputs. A single week's TVL move is often one wallet,
+// not a trend, so seven-day growth is clamped to -50..+80 per cent and weighted at 0.5:
+// the growth multiplier now moves implied value by 0.75x to 1.40x, never nearly double.
+// Age is the weakest signal of the four — a protocol that has run three years with no
+// token is established, but no nearer a launch than a younger one — so maturity moves
+// implied value by 0.70x to 1.00x. TVL at the category multiple does the pricing; growth
+// and age only tilt it.
+//
 //   catMultiple = median(mcap_usd / tvl_usd) over live protocols of the same category
 //                 (at least 3 of them, else the global median over all live protocols),
 //                 clamped to [0.05, 1.50]
-//   growth      = clamp(change_7d, -50, 150) per cent; null growth counts as 0
-//   growthMult  = 1 + (growth / 100) x 0.6
-//   maturity    = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age unknown: 365 days)
+//   growth      = clamp(change_7d, -50, 80) per cent; null growth counts as 0
+//   growthMult  = 1 + (growth / 100) x 0.5
+//   maturity    = 0.7 + min(age_days, 1095) / 1095 x 0.3   (age unknown: 365 days)
 //   breadth     = 1 + 0.02 x min(chains - 1, 4)            (multi-chain reach, at most +8%)
 //   implied     = max(1, round(tvl_usd x catMultiple x growthMult x maturity x breadth))
 //
 // Farm plans are derived the same way, from the protocol's own record: its category picks
 // the action, its first chain picks where it happens and what the gas costs, its TVL picks
-// the capital, its age picks the hold. Every step states what it costs and how long it takes.
+// the capital, its age picks the hold. One step is new in radar-3: a watch-out read off
+// the same figures — a falling week, a hot week, a long run with no token, TVL spread
+// over many chains, or a multiple borrowed from the global median — so no two plans are
+// the same where the figures differ. Every step states what it costs and how long it takes.
 
 /** One protocol entry of the sealed snapshot: exactly its ten fields. */
 export interface SnapshotProtocol {
@@ -72,11 +83,11 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  growth_weight: 0.6,
+  growth_weight: 0.5,
   growth_floor: -50,
-  growth_cap: 150,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
+  growth_cap: 80,
+  maturity_floor: 0.7,
+  maturity_range: 0.3,
   maturity_days: 1095,
   unknown_age_days: 365,
   multiple_floor: 0.05,
@@ -87,7 +98,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -144,6 +155,7 @@ export interface RadarRow {
   implied_value_usd: number;
   watchlist: boolean;
   category_multiple: number;
+  category_live_n: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
@@ -379,7 +391,7 @@ export function buildBoard(
       breadth_multiplier: round4(s.breadthMult),
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age).map(stepText),
+    farm_steps: farmSteps(s.p, s.age, s.growthPct, s.liveN < model.multiple_min_live).map(stepText),
   }));
   return { board, multiples: table, globalMultiple: global };
 }
@@ -458,11 +470,47 @@ function weeklyFor(p: SnapshotProtocol): string {
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is
- * derived from the protocol's own record (category, chains, TVL, age), never from a
- * hand-written list of names.
+ * The watch-out: one caution read off the protocol's own figures, so a plan is never
+ * the same where the figures differ. The strongest signal wins: a falling week, a hot
+ * week, a long run with no token, TVL spread over many chains, or a multiple borrowed
+ * from the global median because its category has too few live protocols to price it.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function watchOut(
+  p: SnapshotProtocol,
+  age: number | null,
+  growthPct: number,
+  fromGlobal: boolean,
+): string {
+  if (growthPct <= -10) {
+    return `TVL fell ${Math.abs(growthPct).toFixed(1)}% in the last week — check whether one wallet left before you add capital; a falling base earns fewer points per dollar.`;
+  }
+  if (growthPct >= 50) {
+    return `TVL jumped ${growthPct.toFixed(1)}% in one week — confirm the deposits stick for a second week before sizing up; one hot week is often one wallet.`;
+  }
+  if (age !== null && age >= 1095) {
+    return `It has run ${Math.floor(age / 365)} years with no token on record — a launch is less certain than for a younger protocol, so keep this farm small.`;
+  }
+  if (p.chains.length >= 4) {
+    return `TVL sits on ${p.chains.length} chains — farm on ${chainOf(p)}, where the deepest pool is, and skip the thin ones.`;
+  }
+  if (fromGlobal) {
+    return `Its category has fewer than 3 live protocols, so its multiple is the global median — treat the implied value as a rough guide, not a price.`;
+  }
+  return `Re-check the 7-day growth before each weekly action: a turn in the trend is the first sign the farm is cooling.`;
+}
+
+/**
+ * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is
+ * derived from the protocol's own record (category, chains, TVL, age, growth, and whether
+ * its multiple is its category's own or the global median), never from a hand-written
+ * list of names. The DefiLlama page in step six follows from the slug alone.
+ */
+export function farmSteps(
+  p: SnapshotProtocol,
+  age: number | null,
+  growthPct = 0,
+  fromGlobal = false,
+): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
@@ -491,7 +539,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: `${hold} days`,
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
+      text: watchOut(p, age, growthPct, fromGlobal),
+      cost: 'nothing to check, and it decides the size',
+      time: '10 minutes',
+    },
+    {
+      text: `Before you withdraw, open the protocol's own points or rewards page — start from its DefiLlama page at defillama.com/protocol/${p.slug} — and claim only from a link the protocol itself publishes.`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
     },
@@ -536,6 +589,7 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     watchlist: row.watchlist,
     category_multiple: row.model.category_multiple_raw,
+    category_live_n: row.model.category_live_n,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,

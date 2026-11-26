@@ -1,4 +1,4 @@
-// Token Radar's dashboard (radar-2). It reads window.RADAR (written beside dashboard/
+// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside dashboard/
 // by main.ts) and renders the ranked board, a filterable table, a per-protocol detail
 // view with the model's own inputs and the protocol's farm plan, a live-token view, and
 // the table of category multiples the model is priced from. No network: every byte it
@@ -104,17 +104,29 @@
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
+  function watchOut(p, growthPct, fromGlobal) {
+    var age = p.age_days === null || p.age_days === undefined ? null : p.age_days;
+    if (growthPct <= -10) return 'TVL fell ' + Math.abs(growthPct).toFixed(1) + '% in the last week — check whether one wallet left before you add capital; a falling base earns fewer points per dollar.';
+    if (growthPct >= 50) return 'TVL jumped ' + growthPct.toFixed(1) + '% in one week — confirm the deposits stick for a second week before sizing up; one hot week is often one wallet.';
+    if (age !== null && age >= 1095) return 'It has run ' + Math.floor(age / 365) + ' years with no token on record — a launch is less certain than for a younger protocol, so keep this farm small.';
+    if (p.chains && p.chains.length >= 4) return 'TVL sits on ' + p.chains.length + ' chains — farm on ' + chainOf(p) + ', where the deepest pool is, and skip the thin ones.';
+    if (fromGlobal) return 'Its category has fewer than 3 live protocols, so its multiple is the global median — treat the implied value as a rough guide, not a price.';
+    return 'Re-check the 7-day growth before each weekly action: a turn in the trend is the first sign the farm is cooling.';
+  }
   function farmSteps(p) {
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
     var gas = gasFor(chain);
+    var growthPct = Math.min(DATA.model.growth_cap, Math.max(DATA.model.growth_floor, p.change_7d === null || p.change_7d === undefined ? 0 : p.change_7d));
+    var fromGlobal = (p.category_live_n === null || p.category_live_n === undefined ? 0 : p.category_live_n) < DATA.model.multiple_min_live;
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and ' + gas.setup, time: '15 minutes to set up' },
       { text: 'Make one qualifying action each week, such as ' + weeklyFor(p) + '.', cost: gas.weekly, time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+      { text: watchOut(p, growthPct, fromGlobal), cost: 'nothing to check, and it decides the size', time: '10 minutes' },
+      { text: "Before you withdraw, open the protocol's own points or rewards page — start from its DefiLlama page at defillama.com/protocol/" + p.slug + ' — and claim only from a link the protocol itself publishes.', cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
   }
@@ -162,6 +174,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
+      else if (key === 'multiple') { av = a.category_multiple; bv = b.category_multiple; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -236,6 +249,7 @@
         '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
         '<td class="num ' + growthClass + '">' + growth + '</td>' +
         '<td class="num">' + fmtAge(r.age_days) + '</td>' +
+        '<td class="num">' + fmtMult(r.category_multiple) + '</td>' +
         '<td><div class="implied"><div class="bar" aria-hidden="true"><i style="width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%"></i></div>' +
         '<span class="num">' + fmtUsd(r.implied_value_usd) + '</span></div></td>' +
         '<td><span class="status">no token</span></td></tr>';
@@ -244,7 +258,7 @@
       '<caption class="sub">Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.</caption>' +
       '<thead><tr><th scope="col">' + sortBtn('implied', 'Rank') + '</th><th scope="col">' + sortBtn('name', 'Protocol') + '</th>' +
       '<th scope="col">' + sortBtn('tvl', 'TVL') + '</th><th scope="col">' + sortBtn('growth', '7d') + '</th>' +
-      '<th scope="col">' + sortBtn('age', 'Age') + '</th><th scope="col">' + sortBtn('implied', 'Implied value') + '</th><th scope="col">Token</th></tr></thead>' +
+      '<th scope="col">' + sortBtn('age', 'Age') + '</th><th scope="col">' + sortBtn('multiple', 'Multiple') + '</th><th scope="col">' + sortBtn('implied', 'Implied value') + '</th><th scope="col">Token</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div></div>';
   }
 
@@ -324,7 +338,8 @@
       '<div><span>Maturity multiplier</span><b class="num">' + fmtMult(row.maturity_multiplier) + '</b></div>' +
       '<div><span>Chain breadth (' + (row.chains || []).length + ' chains)</span><b class="num">' + fmtMult(row.breadth_multiplier) + '</b></div>' +
       '<div class="total"><span>Implied value</span><b class="num">' + fmtUsd(row.implied_value_usd) + '</b></div>' +
-      '</div><p class="note">Model ' + esc(DATA.model_version) + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) +
+      '</div><p class="note">Why rank ' + row.rank + ': ' + fmtUsd(row.tvl_usd) + ' of TVL at the ' + esc(row.category || 'Other') + ' multiple of ' + fmtMult(row.category_multiple) + ', with ' + fmtPct(row.change_7d) + ' seven-day growth and ' + fmtAge(row.age_days) + ' with no token on record.</p>' +
+      '<p class="note">Model ' + esc(DATA.model_version) + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) +
       (match ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') +
       ' This is an estimate, not a price. The protocol records no token in the snapshot; that is what the record says, not proof it has none.</p></section>' +
       '<section class="detail-section"><h3>Farm plan</h3><ol class="steps">' + stepsHtml + '</ol>' +
